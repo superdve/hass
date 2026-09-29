@@ -272,22 +272,21 @@ class LedvanceTuyaLight(CoordinatorEntity[LedvanceTuyaCoordinator], LightEntity)
     def _tuya_to_ha_color_temp(self, value: int) -> int:
         """Map Tuya color temp (0-1000) to HA kelvin (2000-6536).
 
-        Tuya 0 = coldest (high K), Tuya max = warmest (low K).
+        Tuya 0 = warmest (low K), Tuya max = coldest (high K).
         """
         lo, hi = self._temp_min, self._temp_max
         ratio = (value - lo) / max(hi - lo, 1)
-        # ratio 0 → max_kelvin (cold), ratio 1 → min_kelvin (warm)
         return round(
-            HA_COLOUR_TEMP_MAX_KELVIN
-            - ratio * (HA_COLOUR_TEMP_MAX_KELVIN - HA_COLOUR_TEMP_MIN_KELVIN)
+            HA_COLOUR_TEMP_MIN_KELVIN
+            + ratio * (HA_COLOUR_TEMP_MAX_KELVIN - HA_COLOUR_TEMP_MIN_KELVIN)
         )
 
     def _ha_to_tuya_color_temp(self, kelvin: int) -> int:
         """Map HA kelvin to Tuya color temp range."""
         lo, hi = self._temp_min, self._temp_max
-        ratio = (HA_COLOUR_TEMP_MAX_KELVIN - kelvin) / max(
-            HA_COLOUR_TEMP_MAX_KELVIN - HA_COLOUR_TEMP_MIN_KELVIN, 1
-        )
+        span = max(HA_COLOUR_TEMP_MAX_KELVIN - HA_COLOUR_TEMP_MIN_KELVIN, 1)
+        ratio = (kelvin - HA_COLOUR_TEMP_MIN_KELVIN) / span
+        ratio = max(0.0, min(1.0, ratio))
         return round(lo + ratio * (hi - lo))
 
     @staticmethod
