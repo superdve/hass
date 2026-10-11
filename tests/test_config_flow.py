@@ -7,7 +7,8 @@ import pytest
 from homeassistant import config_entries, data_entry_flow
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 
-from custom_components.hass_ledvance.const import CONF_REGION, DOMAIN
+from custom_components.hass_ledvance.api import TuyaAPI
+from custom_components.hass_ledvance.const import CONF_REGION, DOMAIN, SYLVANIA_CLIENT_ID
 from custom_components.hass_ledvance.exceptions import CannotConnect, InvalidAuthentication
 
 VALID_INPUT = {
@@ -163,3 +164,46 @@ class TestConfigFlowDuplicatePrevention:
             )
 
         assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
+
+
+class TestConfigFlowSylvaniaApp:
+    async def test_sylvania_region_is_offered(self, hass):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        regions = result["data_schema"].schema[CONF_REGION].container
+        assert "US (Sylvania app)" in regions
+        assert "US" in regions
+
+    async def test_validation_logs_in_with_sylvania_identity(self, hass):
+        used_client_ids: list[str] = []
+
+        def fake_login(self):
+            used_client_ids.append(self._client_id)
+
+        # Stub entry setup so only the config-flow validation login is observed.
+        with patch.object(TuyaAPI, "login", fake_login), patch(
+            "custom_components.hass_ledvance.async_setup_entry", return_value=True
+        ):
+            result = await hass.config_entries.flow.async_init(
+                DOMAIN, context={"source": config_entries.SOURCE_USER}
+            )
+            result = await hass.config_entries.flow.async_configure(
+                result["flow_id"],
+                user_input={**VALID_INPUT, CONF_REGION: "US (Sylvania app)"},
+            )
+
+        assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
+        assert result["title"] == "user@example.com (US (Sylvania app))"
+        assert used_client_ids == [SYLVANIA_CLIENT_ID]
+
+    async def test_same_email_can_add_ledvance_and_sylvania_entries(self, hass):
+        with _patch_validate():
+            for region in ("US", "US (Sylvania app)"):
+                result = await hass.config_entries.flow.async_init(
+                    DOMAIN, context={"source": config_entries.SOURCE_USER}
+                )
+                result = await hass.config_entries.flow.async_configure(
+                    result["flow_id"], user_input={**VALID_INPUT, CONF_REGION: region}
+                )
+                assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY

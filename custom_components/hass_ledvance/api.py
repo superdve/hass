@@ -15,10 +15,13 @@ import requests
 from Crypto.PublicKey import RSA
 
 from .const import (
+    APP_CREDENTIALS,
+    REGIONS,
     TUYA_CLIENT_ID,
     TUYA_DEVICE_ID,
     TUYA_SECRET_KEY,
     TUYA_USER_AGENT,
+    region_app,
 )
 from .exceptions import CannotConnect, InvalidAuthentication, InvalidUserSession, TooManyRequests
 from .textbook_rsa import new as new_textbook_rsa
@@ -30,6 +33,11 @@ API_VERSION_FOR_ACTION: dict[str, str] = {
     "tuya.m.location.room.list": "2.0",
 }
 DEFAULT_API_VERSION = "1.0"
+
+# Only these actions have their full result logged at debug level. Other results
+# (login, session refresh, device info, ...) can contain session IDs, refresh
+# tokens or device local keys and must never be logged.
+_LOGGABLE_RESULT_ACTIONS = frozenset({"tuya.m.device.dp.get", "tuya.m.device.dp.publish"})
 
 
 @dataclass
@@ -77,6 +85,21 @@ class TuyaAPI:
         self.session = requests.Session()
         self.sid: str | None = None
         self.refresh_token: str = ""
+
+    @classmethod
+    def for_region(cls, region: str, email: str, password: str, **kwargs) -> TuyaAPI:
+        """Build a client for a region key from REGIONS, using its app identity."""
+        region_cfg = REGIONS[region]
+        client_id, tuya_key = APP_CREDENTIALS[region_app(region)]
+        return cls(
+            email=email,
+            password=password,
+            endpoint=region_cfg["endpoint"],
+            country_code=region_cfg["country_code"],
+            client_id=client_id,
+            tuya_key=tuya_key,
+            **kwargs,
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -138,10 +161,15 @@ class TuyaAPI:
                 response = self.session.post(
                     self._endpoint, params=params, data=data, headers=headers, timeout=15
                 )
-                result = self._handle(
-                    response.json(), options.get("action", ""), api_version
+                action = options.get("action", "")
+                body = response.json()
+                _LOGGER.debug(
+                    "API %s → HTTP %s success=%s errorCode=%s",
+                    action, response.status_code, body.get("success"), body.get("errorCode"),
                 )
-                _LOGGER.debug("API %s → %s", options.get("action"), result)
+                result = self._handle(body, action, api_version)
+                if action in _LOGGABLE_RESULT_ACTIONS:
+                    _LOGGER.debug("API %s result: %s", action, result)
                 return result
             except TooManyRequests:
                 if rate_attempt == 3:
@@ -201,6 +229,10 @@ class TuyaAPI:
         if error_code == "USER_SESSION_INVALID":
             raise InvalidUserSession
         if error_code == "USER_PASSWD_WRONG":
+            _LOGGER.warning(
+                "Login rejected: %s: %s (endpoint=%s client_id=%s)",
+                error_code, result.get("errorMsg"), self._endpoint, self._client_id,
+            )
             raise InvalidAuthentication
         if error_code == "REQUEST_TOO_FREQUENTLY_PLEASE_TRY_AGAIN_LATER":
             raise TooManyRequests(result.get("errorMsg", "Rate limited"))
@@ -265,7 +297,7 @@ class TuyaAPI:
         new_refresh = result.get("refreshToken", self.refresh_token) if isinstance(result, dict) else self.refresh_token
         self.sid = new_sid
         self.refresh_token = new_refresh
-        _LOGGER.debug("Session refreshed silently, SID: %s…", self.sid[:8])
+        _LOGGER.debug("Session refreshed silently")
         if self._on_tokens_updated and self.sid:
             self._on_tokens_updated(self.sid, self.refresh_token)
 
@@ -294,7 +326,7 @@ class TuyaAPI:
         )
         self.sid = login_info["sid"]
         self.refresh_token = login_info.get("refreshToken", "")
-        _LOGGER.debug("Logged in, SID: %s…", self.sid[:8] if self.sid else "None")
+        _LOGGER.debug("Logged in (endpoint=%s client_id=%s)", self._endpoint, self._client_id)
         if self._on_tokens_updated and self.sid:
             self._on_tokens_updated(self.sid, self.refresh_token)
         elif self._on_sid_updated and self.sid:

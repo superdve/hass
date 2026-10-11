@@ -12,7 +12,7 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
 
 from .api import TuyaAPI
-from .const import CONF_REGION, DOMAIN, PLATFORMS, REGIONS
+from .const import CONF_REGION, DOMAIN, PLATFORMS
 from .coordinator import LedvanceTuyaCoordinator
 from .exceptions import CannotConnect, InvalidAuthentication, TooManyRequests
 
@@ -27,8 +27,6 @@ type LedvanceTuyaConfigEntry = ConfigEntry[LedvanceTuyaCoordinator]
 
 async def async_setup_entry(hass: HomeAssistant, entry: LedvanceTuyaConfigEntry) -> bool:
     """Set up Ledvance/Tuya from a config entry."""
-    region_cfg = REGIONS[entry.data[CONF_REGION]]
-
     def _persist_tokens(new_sid: str, new_refresh: str) -> None:
         """Persist freshly obtained tokens into the config entry (thread-safe)."""
         hass.loop.call_soon_threadsafe(
@@ -39,11 +37,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: LedvanceTuyaConfigEntry)
         )
         _LOGGER.debug("Persisted new SID and refresh token")
 
-    api = TuyaAPI(
-        email=entry.data[CONF_EMAIL],
-        password=entry.data[CONF_PASSWORD],
-        endpoint=region_cfg["endpoint"],
-        country_code=region_cfg["country_code"],
+    api = TuyaAPI.for_region(
+        entry.data[CONF_REGION],
+        entry.data[CONF_EMAIL],
+        entry.data[CONF_PASSWORD],
         on_tokens_updated=_persist_tokens,
     )
 

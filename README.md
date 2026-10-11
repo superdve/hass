@@ -143,7 +143,9 @@ The integration is configured entirely through the UI — no YAML required.
 |---|---|
 | **Email** | The email address you use to log in to the Ledvance or Sylvania app |
 | **Password** | Your app password |
-| **Region** | The region your account is registered in — `EU`, `US`, `China`, or `India` |
+| **Region** | The region your account is registered in — `EU`, `US`, `China`, or `India`. **Sylvania app users:** choose `US (Sylvania app)` |
+
+> **Sylvania users:** Sylvania app accounts are separate from Ledvance app accounts, even though both apps run on the same cloud. If you set up your devices in the **Sylvania** app, pick the **`US (Sylvania app)`** region. Choosing plain `US` sends your login through the Ledvance app identity, and the cloud rejects it as "Invalid email or password" even when your credentials are correct.
 
 Session tokens are cached in the config entry after the first successful login, so restarting HA does not trigger a new login request or push notification to your phone.
 
@@ -228,6 +230,10 @@ Per-outlet countdown timers (in seconds) where supported by the device.
 ---
 
 ## Troubleshooting
+
+### "Invalid email or password" with credentials that work in the app
+
+If your devices are set up in the **Sylvania** app, make sure you chose the `US (Sylvania app)` region — see [Configuration](#configuration). The reason the cloud gave for a rejected login is logged as a warning (credentials and tokens are never logged).
 
 ### Devices appear offline but are working in the Ledvance app
 

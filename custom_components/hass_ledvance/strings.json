@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect to Ledvance / Tuya",
-        "description": "Enter your Ledvance (or compatible Tuya OEM) account credentials. Devices will be discovered automatically.",
+        "description": "Enter your Ledvance or Sylvania app account credentials. If you use the Sylvania app, choose the \"US (Sylvania app)\" region. Devices will be discovered automatically.",
         "data": {
           "email": "Email address",
           "password": "Password",

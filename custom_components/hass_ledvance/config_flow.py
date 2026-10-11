@@ -10,7 +10,7 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 
 from .api import TuyaAPI
-from .const import CONF_REGION, DEFAULT_REGION, DOMAIN, REGIONS
+from .const import CONF_REGION, DEFAULT_REGION, DOMAIN, REGIONS, region_app
 from .exceptions import CannotConnect, InvalidAuthentication
 
 _LOGGER = logging.getLogger(__name__)
@@ -28,13 +28,7 @@ async def _validate_credentials(
     hass: HomeAssistant, data: dict[str, Any]
 ) -> None:
     """Raise on auth or connectivity failure."""
-    region_cfg = REGIONS[data[CONF_REGION]]
-    api = TuyaAPI(
-        email=data[CONF_EMAIL],
-        password=data[CONF_PASSWORD],
-        endpoint=region_cfg["endpoint"],
-        country_code=region_cfg["country_code"],
-    )
+    api = TuyaAPI.for_region(data[CONF_REGION], data[CONF_EMAIL], data[CONF_PASSWORD])
     await hass.async_add_executor_job(api.login)
 
 
@@ -52,8 +46,16 @@ class LedvanceTuyaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             try:
                 await _validate_credentials(self.hass, user_input)
             except InvalidAuthentication:
+                _LOGGER.warning(
+                    "Authentication failed (region=%s, app=%s)",
+                    user_input[CONF_REGION], region_app(user_input[CONF_REGION]),
+                )
                 errors["base"] = "invalid_auth"
-            except CannotConnect:
+            except CannotConnect as exc:
+                _LOGGER.warning(
+                    "Cannot connect to Tuya cloud (region=%s): %s",
+                    user_input[CONF_REGION], exc,
+                )
                 errors["base"] = "cannot_connect"
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Unexpected error during config flow")
