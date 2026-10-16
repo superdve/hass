@@ -93,7 +93,7 @@ def _send_local(
             version=float(version),
         )
         device.set_socketTimeout(_LOCAL_TIMEOUT)
-        result = device.set_status(dps_dict, nowait=False)
+        result = device.set_multiple_values(dps_dict, nowait=False)
         # tinytuya returns None or a dict; an error dict has "Error" key
         if isinstance(result, dict) and "Error" in result:
             _LOGGER.debug("tinytuya local error: %s", result["Error"])
