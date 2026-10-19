@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 #
 # ===================================================================
 # Textbook RSA - Encryption only
@@ -25,12 +24,10 @@
 # SOFTWARE.
 # ===================================================================
 
-from Crypto.Signature.pss import MGF1
 import Crypto.Hash.SHA1
-
-from Crypto.Util.py3compat import _copy_bytes
-from Crypto.Util.number import bytes_to_long, long_to_bytes
 from Crypto import Random
+from Crypto.Signature.pss import MGF1
+from Crypto.Util.number import bytes_to_long, long_to_bytes
 
 
 class TextBookRSA:
@@ -47,7 +44,8 @@ class TextBookRSA:
         else:
             self._mgf = lambda x, y: MGF1(x, y, self._hashObj)
 
-        self._label = _copy_bytes(None, None, label)
+        # The private py3compat helper was removed in PyCryptodome 4.
+        self._label = bytes(label)
         self._randfunc = randfunc
 
     def can_encrypt(self):

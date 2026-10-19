@@ -1,7 +1,7 @@
 """Tuya cloud API client for the Ledvance/Tuya integration."""
+
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import json
@@ -9,18 +9,27 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import requests
 from Crypto.PublicKey import RSA
 
 from .const import (
+    APP_CREDENTIALS,
+    REGIONS,
     TUYA_CLIENT_ID,
     TUYA_DEVICE_ID,
     TUYA_SECRET_KEY,
     TUYA_USER_AGENT,
+    region_app,
 )
-from .exceptions import CannotConnect, InvalidAuthentication, InvalidUserSession, TooManyRequests
+from .exceptions import (
+    CannotConnect,
+    InvalidAuthentication,
+    InvalidUserSession,
+    TooManyRequests,
+    UnsupportedAPI,
+)
 from .textbook_rsa import new as new_textbook_rsa
 
 _LOGGER = logging.getLogger(__name__)
@@ -30,6 +39,11 @@ API_VERSION_FOR_ACTION: dict[str, str] = {
     "tuya.m.location.room.list": "2.0",
 }
 DEFAULT_API_VERSION = "1.0"
+
+# Only these actions have their full result logged at debug level. Other results
+# (login, session refresh, device info, ...) can contain session IDs, refresh
+# tokens or device local keys and must never be logged.
+_LOGGABLE_RESULT_ACTIONS = frozenset({"tuya.m.device.dp.get", "tuya.m.device.dp.publish"})
 
 
 @dataclass
@@ -43,9 +57,9 @@ class DeviceInfo:
     is_online: bool
     local_key: str
     mac: str
-    schema: list       # parsed schema list
-    dps: dict          # current DPS state dict (str keys)
-    ip: str | None = None        # local IP reported by cloud (localIp field) — usually WAN
+    schema: list  # parsed schema list
+    dps: dict  # current DPS state dict (str keys)
+    ip: str | None = None  # local IP reported by cloud (localIp field) — usually WAN
     version: str | None = None  # Tuya protocol version (pv field, e.g. "3.3") — used by tinytuya
     fw_version: str | None = None  # firmware/base version (bv field, e.g. "40") — display only
     room_name: str = ""  # Tuya room/area name; empty if unknown
@@ -77,6 +91,23 @@ class TuyaAPI:
         self.session = requests.Session()
         self.sid: str | None = None
         self.refresh_token: str = ""
+        self._room_versions: dict[str, str | None] = {}
+        self._room_cache: dict[str, tuple[float, dict[str, str]]] = {}
+
+    @classmethod
+    def for_region(cls, region: str, email: str, password: str, **kwargs) -> TuyaAPI:
+        """Build a client for a region key from REGIONS, using its app identity."""
+        region_cfg = REGIONS[region]
+        client_id, tuya_key = APP_CREDENTIALS[region_app(region)]
+        return cls(
+            email=email,
+            password=password,
+            endpoint=region_cfg["endpoint"],
+            country_code=region_cfg["country_code"],
+            client_id=client_id,
+            tuya_key=tuya_key,
+            **kwargs,
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -88,6 +119,8 @@ class TuyaAPI:
         post_data: dict | None = None,
         requires_sid: bool = True,
         do_not_relogin: bool = False,
+        *,
+        api_version: str | None = None,
     ) -> dict | list:
         headers = {"User-Agent": TUYA_USER_AGENT}
         data = (
@@ -101,7 +134,7 @@ class TuyaAPI:
             sanitized_options["a"] = options["action"]
             del sanitized_options["action"]
 
-        api_version = API_VERSION_FOR_ACTION.get(
+        api_version = api_version or API_VERSION_FOR_ACTION.get(
             options.get("action", ""), DEFAULT_API_VERSION
         )
 
@@ -138,10 +171,18 @@ class TuyaAPI:
                 response = self.session.post(
                     self._endpoint, params=params, data=data, headers=headers, timeout=15
                 )
-                result = self._handle(
-                    response.json(), options.get("action", ""), api_version
+                action = options.get("action", "")
+                body = response.json()
+                _LOGGER.debug(
+                    "API %s → HTTP %s success=%s errorCode=%s",
+                    action,
+                    response.status_code,
+                    body.get("success"),
+                    body.get("errorCode"),
                 )
-                _LOGGER.debug("API %s → %s", options.get("action"), result)
+                result = self._handle(body, action, api_version)
+                if action in _LOGGABLE_RESULT_ACTIONS:
+                    _LOGGER.debug("API %s result: %s", action, result)
                 return result
             except TooManyRequests:
                 if rate_attempt == 3:
@@ -149,7 +190,9 @@ class TuyaAPI:
                 wait = 10.0 * rate_attempt
                 _LOGGER.warning(
                     "API rate limited on %s (attempt %d/3), retrying in %.0fs",
-                    options.get("action"), rate_attempt, wait,
+                    options.get("action"),
+                    rate_attempt,
+                    wait,
                 )
                 time.sleep(wait)
                 # Rebuild time/requestId for the retry
@@ -162,17 +205,38 @@ class TuyaAPI:
                 if not do_not_relogin:
                     _LOGGER.info("Session expired — re-logging in")
                     self.login()
-                    return self._api(options, post_data, requires_sid, True)
+                    return self._api(
+                        options, post_data, requires_sid, True, api_version=api_version
+                    )
                 raise
             except requests.RequestException as exc:
-                raise CannotConnect(str(exc)) from exc
+                # requests exceptions can contain signed URLs, including the SID.
+                raise CannotConnect(f"Cloud request failed ({type(exc).__name__})") from exc
         raise AssertionError("unreachable")
 
     def _sign(self, data: dict) -> str:
         KEYS_TO_SIGN = [
-            "a", "v", "lat", "lon", "lang", "deviceId", "imei", "imsi",
-            "appVersion", "ttid", "isH5", "h5Token", "os", "clientId",
-            "postData", "time", "requestId", "n4h5", "sid", "sp", "et",
+            "a",
+            "v",
+            "lat",
+            "lon",
+            "lang",
+            "deviceId",
+            "imei",
+            "imsi",
+            "appVersion",
+            "ttid",
+            "isH5",
+            "h5Token",
+            "os",
+            "clientId",
+            "postData",
+            "time",
+            "requestId",
+            "n4h5",
+            "sid",
+            "sp",
+            "et",
         ]
         sorted_keys = sorted(data.keys())
         str_to_sign = ""
@@ -198,15 +262,27 @@ class TuyaAPI:
         if result.get("success"):
             return result["result"]
         error_code = result.get("errorCode", "")
+        if error_code == "API_OR_API_VERSION_WRONG" and action == "tuya.m.location.room.list":
+            raise UnsupportedAPI(error_code)
         if error_code == "USER_SESSION_INVALID":
             raise InvalidUserSession
         if error_code == "USER_PASSWD_WRONG":
+            _LOGGER.warning(
+                "Login rejected: %s: %s (endpoint=%s client_id=%s)",
+                error_code,
+                result.get("errorMsg"),
+                self._endpoint,
+                self._client_id,
+            )
             raise InvalidAuthentication
         if error_code == "REQUEST_TOO_FREQUENTLY_PLEASE_TRY_AGAIN_LATER":
             raise TooManyRequests(result.get("errorMsg", "Rate limited"))
         _LOGGER.error(
             "API error %s: %s (action=%s v=%s)",
-            error_code, result.get("errorMsg"), action, api_version,
+            error_code,
+            result.get("errorMsg"),
+            action,
+            api_version,
         )
         raise ValueError(f"API error: {error_code} — {result.get('errorMsg')}")
 
@@ -234,7 +310,9 @@ class TuyaAPI:
                 self._refresh_session()
                 return
             except Exception as exc:  # noqa: BLE001
-                _LOGGER.debug("Refresh token exchange failed (%s) — falling back to full login", exc)
+                _LOGGER.debug(
+                    "Refresh token exchange failed (%s) — falling back to full login", exc
+                )
                 self.refresh_token = ""
 
         for attempt in range(1, _retries + 1):
@@ -247,7 +325,9 @@ class TuyaAPI:
                 wait = _backoff * attempt
                 _LOGGER.warning(
                     "Rate limited during login (attempt %d/%d), retrying in %.0fs",
-                    attempt, _retries, wait,
+                    attempt,
+                    _retries,
+                    wait,
                 )
                 time.sleep(wait)
 
@@ -262,10 +342,14 @@ class TuyaAPI:
         new_sid = result.get("sid") if isinstance(result, dict) else None
         if not new_sid:
             raise ValueError("No SID in refresh response")
-        new_refresh = result.get("refreshToken", self.refresh_token) if isinstance(result, dict) else self.refresh_token
+        new_refresh = (
+            result.get("refreshToken", self.refresh_token)
+            if isinstance(result, dict)
+            else self.refresh_token
+        )
         self.sid = new_sid
         self.refresh_token = new_refresh
-        _LOGGER.debug("Session refreshed silently, SID: %s…", self.sid[:8])
+        _LOGGER.debug("Session refreshed silently")
         if self._on_tokens_updated and self.sid:
             self._on_tokens_updated(self.sid, self.refresh_token)
 
@@ -294,7 +378,7 @@ class TuyaAPI:
         )
         self.sid = login_info["sid"]
         self.refresh_token = login_info.get("refreshToken", "")
-        _LOGGER.debug("Logged in, SID: %s…", self.sid[:8] if self.sid else "None")
+        _LOGGER.debug("Logged in (endpoint=%s client_id=%s)", self._endpoint, self._client_id)
         if self._on_tokens_updated and self.sid:
             self._on_tokens_updated(self.sid, self.refresh_token)
         elif self._on_sid_updated and self.sid:
@@ -305,26 +389,57 @@ class TuyaAPI:
         return self._api({"action": "tuya.m.location.list"})  # type: ignore[return-value]
 
     def rooms(self, group_id: str) -> dict[str, str]:
-        """Return {roomId: roomName} for a location. Empty dict on failure."""
-        try:
-            raw = self._api({"action": "tuya.m.location.room.list", "gid": group_id})
-            return {
-                str(room["roomId"]): room["name"]
-                for room in (raw or [])  # type: ignore[union-attr]
-                if "roomId" in room and "name" in room
-            }
-        except Exception:  # noqa: BLE001
-            _LOGGER.debug("Could not fetch room list for group %s", group_id)
+        """Best-effort room metadata with bounded version fallback and caching.
+
+        OEM app identities do not all expose the same room API. An unsupported
+        optional API must not be called/logged on every device-state poll.
+        """
+        now = time.monotonic()
+        if cached := self._room_cache.get(group_id):
+            if now < cached[0]:
+                return cached[1]
+        if group_id in self._room_versions and self._room_versions[group_id] is None:
             return {}
+        preferred = self._room_versions.get(group_id, "1.0")
+        versions = [preferred] + [v for v in ("1.0", "2.0") if v != preferred]
+        for version in versions:
+            try:
+                raw = self._api(
+                    {"action": "tuya.m.location.room.list", "gid": group_id},
+                    api_version=version,
+                )
+                if not isinstance(raw, list):
+                    raise ValueError("Unexpected room response type")
+                rooms = {
+                    str(room["roomId"]): str(room["name"])
+                    for room in raw
+                    if isinstance(room, dict) and "roomId" in room and "name" in room
+                }
+                self._room_versions[group_id] = version
+                self._room_cache[group_id] = (now + 300, rooms)
+                return rooms
+            except UnsupportedAPI:
+                continue
+            except (InvalidAuthentication, InvalidUserSession, TooManyRequests):
+                raise
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.debug("Optional room metadata unavailable (%s)", type(exc).__name__)
+                self._room_cache[group_id] = (now + 300, {})
+                return {}
+        self._room_versions[group_id] = None
+        _LOGGER.warning(
+            "The OEM cloud does not support room metadata for this home. "
+            "Automatic area matching is skipped until the integration is reloaded; "
+            "device control and existing Home Assistant areas are unaffected."
+        )
+        return {}
 
     def devices(self, group_id: str) -> list[DeviceInfo]:
         """Return all devices in a group, with room names attached."""
         # Room list: {roomId → roomName} — best-effort, non-fatal
         room_map = self.rooms(group_id)
 
-        raw_list = self._api(
-            {"action": "tuya.m.my.group.device.list", "gid": group_id}
-        )
+        raw_list = self._api({"action": "tuya.m.my.group.device.list", "gid": group_id})
 
         # Build devId → roomName from the list payload (contains roomId per device)
         dev_room: dict[str, str] = {}
@@ -375,8 +490,8 @@ class TuyaAPI:
 
     def set_dps(self, device_id: str, gateway_id: str, dps: dict) -> bool:
         """Send DPS command via cloud. Returns True on success."""
-        self._api(
+        result = self._api(
             {"action": "tuya.m.device.dp.publish"},
             {"devId": device_id, "gwId": gateway_id, "dps": json.dumps(dps)},
         )
-        return True
+        return result is not False

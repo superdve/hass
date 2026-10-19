@@ -5,10 +5,11 @@ Two categories:
   - Alarm / fault (socket_strip only)  — overvoltage, overcurrent, overtemperature,
                                          leakage-current fault flag
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.binary_sensor import (
@@ -42,25 +43,30 @@ _LOGGER = logging.getLogger(__name__)
 # Alarm sensor descriptions (socket_strip)
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, kw_only=True)
 class LedvanceAlarmDescription(BinarySensorEntityDescription):
     """Alarm binary sensor with an accessor callback."""
+
     # Returns True when the alarm condition is active
     is_on_fn: Any  # Callable[[CoordinatorDeviceData], bool | None]
 
 
 def _dps_flag(dps_code: str):
     """Return a lambda that reads a plain boolean DPS."""
+
     def _fn(dev: CoordinatorDeviceData) -> bool | None:
         dps_num = dev.dps_map.get(dps_code)
         if dps_num is None:
             return None
         return bool(dev.dps.get(dps_num))
+
     return _fn
 
 
 def _fault_bit(bit_mask: int):
     """Return a lambda that tests a specific bit in the 'fault' integer DPS."""
+
     def _fn(dev: CoordinatorDeviceData) -> bool | None:
         dps_num = dev.dps_map.get(DPS_FAULT)
         if dps_num is None:
@@ -69,6 +75,7 @@ def _fault_bit(bit_mask: int):
         if raw is None:
             return None
         return bool(int(raw) & bit_mask)
+
     return _fn
 
 
@@ -135,6 +142,7 @@ ALARM_DESCRIPTIONS: tuple[LedvanceAlarmDescription, ...] = (
 # Setup
 # ---------------------------------------------------------------------------
 
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -173,6 +181,7 @@ async def async_setup_entry(
 # ---------------------------------------------------------------------------
 # Entity classes
 # ---------------------------------------------------------------------------
+
 
 class LedvanceTuyaOnlineSensor(CoordinatorEntity[LedvanceTuyaCoordinator], BinarySensorEntity):
     """Reports whether a Ledvance/Tuya device is reachable in the cloud."""

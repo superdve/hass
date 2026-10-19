@@ -4,11 +4,12 @@ Two categories:
   - Diagnostic sensors (all devices)     — device ID, IP, MAC, local key, firmware version
   - Power monitoring sensors (socket_strip) — current, voltage, power, energy
 """
+
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-import logging
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -45,9 +46,11 @@ _LOGGER = logging.getLogger(__name__)
 # Diagnostic sensors (text, all device types)
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, kw_only=True)
 class LedvanceDiagSensorDescription(SensorEntityDescription):
     """Diagnostic sensor with a data-accessor callback."""
+
     value_fn: Callable[[CoordinatorDeviceData], str | None]
 
 
@@ -87,9 +90,11 @@ DIAG_SENSOR_DESCRIPTIONS: tuple[LedvanceDiagSensorDescription, ...] = (
 # Power monitoring sensors (socket_strip devices only)
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, kw_only=True)
 class LedvancePowerSensorDescription(SensorEntityDescription):
     """Power-monitoring sensor: DPS code + optional default scale divisor."""
+
     dps_code: str
     default_scale: float = 1.0  # fallback if schema has no 'scale' property
 
@@ -99,7 +104,7 @@ POWER_SENSOR_DESCRIPTIONS: tuple[LedvancePowerSensorDescription, ...] = (
         key="current",
         name="Current",
         dps_code=DPS_CUR_CURRENT,
-        default_scale=1000.0,         # Tuya typically reports mA
+        default_scale=1000.0,  # Tuya typically reports mA
         device_class=SensorDeviceClass.CURRENT,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
@@ -109,7 +114,7 @@ POWER_SENSOR_DESCRIPTIONS: tuple[LedvancePowerSensorDescription, ...] = (
         key="voltage",
         name="Voltage",
         dps_code=DPS_CUR_VOLTAGE,
-        default_scale=10.0,           # Tuya typically reports 0.1 V steps
+        default_scale=10.0,  # Tuya typically reports 0.1 V steps
         device_class=SensorDeviceClass.VOLTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfElectricPotential.VOLT,
@@ -119,7 +124,7 @@ POWER_SENSOR_DESCRIPTIONS: tuple[LedvancePowerSensorDescription, ...] = (
         key="power",
         name="Power",
         dps_code=DPS_CUR_POWER,
-        default_scale=10.0,           # Tuya typically reports 0.1 W steps
+        default_scale=10.0,  # Tuya typically reports 0.1 W steps
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPower.WATT,
@@ -129,7 +134,7 @@ POWER_SENSOR_DESCRIPTIONS: tuple[LedvancePowerSensorDescription, ...] = (
         key="energy",
         name="Energy",
         dps_code=DPS_TOTAL_ENERGY,
-        default_scale=1000.0,         # Tuya typically reports Wh; HA wants kWh
+        default_scale=1000.0,  # Tuya typically reports Wh; HA wants kWh
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
@@ -141,6 +146,7 @@ POWER_SENSOR_DESCRIPTIONS: tuple[LedvancePowerSensorDescription, ...] = (
 # ---------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -161,9 +167,7 @@ async def async_setup_entry(
             dps_codes_in_schema = {item.get("code") for item in dev.schema}
             for desc in POWER_SENSOR_DESCRIPTIONS:
                 if desc.dps_code in dps_codes_in_schema:
-                    entities.append(
-                        LedvancePowerSensor(coordinator, entry, dev_id, desc)
-                    )
+                    entities.append(LedvancePowerSensor(coordinator, entry, dev_id, desc))
 
     async_add_entities(entities)
 
@@ -171,6 +175,7 @@ async def async_setup_entry(
 # ---------------------------------------------------------------------------
 # Entity classes
 # ---------------------------------------------------------------------------
+
 
 class LedvanceDiagSensor(CoordinatorEntity[LedvanceTuyaCoordinator], SensorEntity):
     """A diagnostic (text) sensor for any Ledvance/Tuya device."""

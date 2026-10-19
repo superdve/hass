@@ -1,4 +1,5 @@
 """Ledvance / Tuya Home Assistant integration."""
+
 from __future__ import annotations
 
 import difflib
@@ -12,7 +13,7 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
 
 from .api import TuyaAPI
-from .const import CONF_REGION, DOMAIN, PLATFORMS, REGIONS
+from .const import CONF_REGION, DOMAIN, PLATFORMS
 from .coordinator import LedvanceTuyaCoordinator
 from .exceptions import CannotConnect, InvalidAuthentication, TooManyRequests
 
@@ -27,7 +28,6 @@ type LedvanceTuyaConfigEntry = ConfigEntry[LedvanceTuyaCoordinator]
 
 async def async_setup_entry(hass: HomeAssistant, entry: LedvanceTuyaConfigEntry) -> bool:
     """Set up Ledvance/Tuya from a config entry."""
-    region_cfg = REGIONS[entry.data[CONF_REGION]]
 
     def _persist_tokens(new_sid: str, new_refresh: str) -> None:
         """Persist freshly obtained tokens into the config entry (thread-safe)."""
@@ -39,11 +39,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: LedvanceTuyaConfigEntry)
         )
         _LOGGER.debug("Persisted new SID and refresh token")
 
-    api = TuyaAPI(
-        email=entry.data[CONF_EMAIL],
-        password=entry.data[CONF_PASSWORD],
-        endpoint=region_cfg["endpoint"],
-        country_code=region_cfg["country_code"],
+    api = TuyaAPI.for_region(
+        entry.data[CONF_REGION],
+        entry.data[CONF_EMAIL],
+        entry.data[CONF_PASSWORD],
         on_tokens_updated=_persist_tokens,
     )
 
@@ -53,8 +52,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: LedvanceTuyaConfigEntry)
     if cached_sid:
         api.sid = cached_sid
         api.refresh_token = cached_refresh
-        _LOGGER.debug("Restored cached SID%s, skipping login",
-                      " and refresh token" if cached_refresh else "")
+        _LOGGER.debug(
+            "Restored cached SID%s, skipping login", " and refresh token" if cached_refresh else ""
+        )
     else:
         # No cached SID — must authenticate now (will send push notification)
         try:
@@ -138,10 +138,7 @@ async def _async_assign_areas(
     device_reg = dr.async_get(hass)
 
     # Build a lowercase name → area_id lookup from the current HA area registry
-    area_by_name: dict[str, str] = {
-        area.name.lower(): area.id
-        for area in area_reg.areas.values()
-    }
+    area_by_name: dict[str, str] = {area.name.lower(): area.id for area in area_reg.areas.values()}
 
     for dev_id, dev_data in coordinator.data.items():
         if not dev_data.room_name:
