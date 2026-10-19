@@ -15,3 +15,7 @@ class CannotConnect(Exception):
 
 class TooManyRequests(Exception):
     """Raised when the Tuya API rate-limits the request."""
+
+
+class UnsupportedAPI(ValueError):
+    """The OEM cloud does not expose this optional API/version."""

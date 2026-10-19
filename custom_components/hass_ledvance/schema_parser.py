@@ -1,4 +1,5 @@
 """Parse Tuya device schema to detect entity type and DPS number mappings."""
+
 from __future__ import annotations
 
 import json
@@ -6,14 +7,17 @@ import json
 from .const import KNOWN_PRODUCT_TYPES
 
 # DPS codes that indicate a light device
-_LIGHT_CODES = frozenset({
-    "bright_value",
-    "bright_value_v2",
-    "colour_data",
-    "colour_data_v2",
-    "temp_value",
-    "work_mode",
-})
+_LIGHT_CODES = frozenset(
+    {
+        "bright_value",
+        "bright_value_v2",
+        "colour_data",
+        "colour_data_v2",
+        "temp_value",
+        "work_mode",
+        "mix_rgbcw",
+    }
+)
 
 
 def detect_device_type(schema: list[dict], product_id: str) -> str:

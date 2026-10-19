@@ -1,6 +1,8 @@
 """Light platform for Ledvance/Tuya integration."""
+
 from __future__ import annotations
 
+import colorsys
 import logging
 from typing import Any
 
@@ -18,7 +20,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util.color import (
-    color_hs_to_RGB,
     color_RGB_to_hs,
 )
 
@@ -35,13 +36,10 @@ from .const import (
     DPS_WORK_MODE,
     HA_COLOUR_TEMP_MAX_KELVIN,
     HA_COLOUR_TEMP_MIN_KELVIN,
-    TUYA_BRIGHTNESS_MAX,
-    TUYA_BRIGHTNESS_MIN,
-    TUYA_COLOUR_TEMP_MAX,
-    TUYA_COLOUR_TEMP_MIN,
 )
 from .coordinator import CoordinatorDeviceData, LedvanceTuyaCoordinator, build_device_info
-from .local_control import async_send_command
+from .local_control import async_send_and_update
+from .mixed_light import create_mixed_lights
 from .schema_parser import get_enum_range, get_integer_range
 
 # work_mode values that map to HA colour modes rather than effects
@@ -57,11 +55,12 @@ async def async_setup_entry(
 ) -> None:
     """Set up Ledvance/Tuya light entities."""
     coordinator: LedvanceTuyaCoordinator = hass.data[DOMAIN][entry.entry_id]
-    entities = [
-        LedvanceTuyaLight(coordinator, entry, dev_id)
-        for dev_id, dev in coordinator.data.items()
-        if dev.device_type == "light"
-    ]
+    entities: list[LightEntity] = []
+    for dev_id, dev in coordinator.data.items():
+        if dev.device_type != "light":
+            continue
+        mixed = create_mixed_lights(coordinator, entry, dev_id)
+        entities.extend(mixed or [LedvanceTuyaLight(coordinator, entry, dev_id)])
     _LOGGER.debug("Setting up %d light entities", len(entities))
     async_add_entities(entities)
 
@@ -159,6 +158,9 @@ class LedvanceTuyaLight(CoordinatorEntity[LedvanceTuyaCoordinator], LightEntity)
 
     @property
     def brightness(self) -> int | None:
+        if self._colour_dps and (self.color_mode == ColorMode.HS or self._bright_dps is None):
+            if colour := self._decode_colour_data(self._device_data.dps.get(self._colour_dps)):
+                return colour[2]
         if self._bright_dps is None:
             return None
         raw = self._device_data.dps.get(self._bright_dps)
@@ -215,7 +217,15 @@ class LedvanceTuyaLight(CoordinatorEntity[LedvanceTuyaCoordinator], LightEntity)
         if self._switch_dps:
             dps_dict[self._switch_dps] = True
 
-        if ATTR_BRIGHTNESS in kwargs and self._bright_dps:
+        colour_mode = bool(self._colour_dps) and (
+            ATTR_HS_COLOR in kwargs
+            or (
+                ATTR_COLOR_TEMP_KELVIN not in kwargs
+                and (self.color_mode == ColorMode.HS or self._bright_dps is None)
+            )
+        )
+        colour = self._decode_colour_data(self._device_data.dps.get(self._colour_dps))
+        if ATTR_BRIGHTNESS in kwargs and self._bright_dps and not colour_mode:
             dps_dict[self._bright_dps] = self._ha_to_tuya_brightness(kwargs[ATTR_BRIGHTNESS])
             if self._mode_dps:
                 dps_dict[self._mode_dps] = "white"
@@ -225,8 +235,24 @@ class LedvanceTuyaLight(CoordinatorEntity[LedvanceTuyaCoordinator], LightEntity)
             if self._mode_dps:
                 dps_dict[self._mode_dps] = "white"
 
-        if ATTR_HS_COLOR in kwargs and self._colour_dps:
-            dps_dict[self._colour_dps] = self._encode_colour_data(kwargs[ATTR_HS_COLOR])
+        if colour_mode and (ATTR_HS_COLOR in kwargs or ATTR_BRIGHTNESS in kwargs):
+            hs = kwargs.get(ATTR_HS_COLOR, colour[:2] if colour else (0.0, 0.0))
+            brightness = kwargs.get(
+                ATTR_BRIGHTNESS, colour[2] if colour else self.brightness or 255
+            )
+            raw = self._device_data.dps.get(self._colour_dps)
+            dps_dict[self._colour_dps] = self._encode_colour_data(
+                hs, brightness, rgb=isinstance(raw, str) and len(raw.strip()) == 6
+            )
+            # Preserve the original 0..1000 V value exactly when only hue or
+            # saturation changed, instead of quantizing through HA's 0..255.
+            if (
+                ATTR_BRIGHTNESS not in kwargs
+                and colour
+                and isinstance(raw, str)
+                and len(raw.strip()) == 12
+            ):
+                dps_dict[self._colour_dps] = dps_dict[self._colour_dps][:8] + raw.strip()[8:12]
             if self._mode_dps:
                 dps_dict[self._mode_dps] = "colour"
 
@@ -235,24 +261,13 @@ class LedvanceTuyaLight(CoordinatorEntity[LedvanceTuyaCoordinator], LightEntity)
             if effect in self._effect_modes:
                 dps_dict[self._mode_dps] = effect
 
-        await async_send_command(
-            self.hass, self.coordinator.api, self._device_data, dps_dict
-        )
-        self.coordinator.async_optimistic_update(self._device_id, dps_dict)
-        await self.coordinator.async_request_refresh()
+        await async_send_and_update(self.hass, self.coordinator, self._device_id, dps_dict)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         if self._switch_dps is None:
             return
         dps_dict = {self._switch_dps: False}
-        await async_send_command(
-            self.hass,
-            self.coordinator.api,
-            self._device_data,
-            dps_dict,
-        )
-        self.coordinator.async_optimistic_update(self._device_id, dps_dict)
-        await self.coordinator.async_request_refresh()
+        await async_send_and_update(self.hass, self.coordinator, self._device_id, dps_dict)
 
     # ------------------------------------------------------------------
     # Value conversion helpers
@@ -262,59 +277,72 @@ class LedvanceTuyaLight(CoordinatorEntity[LedvanceTuyaCoordinator], LightEntity)
         """Map Tuya brightness (e.g. 10-1000) to HA brightness (1-255)."""
         lo, hi = self._bright_min, self._bright_max
         clamped = max(lo, min(hi, value))
-        return round((clamped - lo) / (hi - lo) * 254 + 1)
+        return round((clamped - lo) / max(hi - lo, 1) * 254 + 1)
 
     def _ha_to_tuya_brightness(self, value: int) -> int:
         """Map HA brightness (1-255) to Tuya brightness range."""
         lo, hi = self._bright_min, self._bright_max
-        return round((value - 1) / 254 * (hi - lo) + lo)
+        return round((max(1, min(255, value)) - 1) / 254 * (hi - lo) + lo)
 
     def _tuya_to_ha_color_temp(self, value: int) -> int:
         """Map Tuya color temp (0-1000) to HA kelvin (2000-6536).
 
-        Tuya 0 = coldest (high K), Tuya max = warmest (low K).
+        Tuya 0 = warmest (low K), Tuya max = coldest (high K).
         """
         lo, hi = self._temp_min, self._temp_max
-        ratio = (value - lo) / max(hi - lo, 1)
-        # ratio 0 → max_kelvin (cold), ratio 1 → min_kelvin (warm)
+        ratio = max(0.0, min(1.0, (value - lo) / max(hi - lo, 1)))
         return round(
-            HA_COLOUR_TEMP_MAX_KELVIN
-            - ratio * (HA_COLOUR_TEMP_MAX_KELVIN - HA_COLOUR_TEMP_MIN_KELVIN)
+            HA_COLOUR_TEMP_MIN_KELVIN
+            + ratio * (HA_COLOUR_TEMP_MAX_KELVIN - HA_COLOUR_TEMP_MIN_KELVIN)
         )
 
     def _ha_to_tuya_color_temp(self, kelvin: int) -> int:
         """Map HA kelvin to Tuya color temp range."""
         lo, hi = self._temp_min, self._temp_max
-        ratio = (HA_COLOUR_TEMP_MAX_KELVIN - kelvin) / max(
+        ratio = (kelvin - HA_COLOUR_TEMP_MIN_KELVIN) / max(
             HA_COLOUR_TEMP_MAX_KELVIN - HA_COLOUR_TEMP_MIN_KELVIN, 1
         )
-        return round(lo + ratio * (hi - lo))
+        return round(lo + max(0.0, min(1.0, ratio)) * (hi - lo))
 
     @staticmethod
-    def _parse_colour_data(raw: str) -> tuple[float, float] | None:
-        """Parse Tuya colour_data string (HHHHSSSSSSSS or RRGGBB) to HS tuple."""
+    def _decode_colour_data(raw: object) -> tuple[float, float, int] | None:
+        """Read hue, saturation and brightness from standard Tuya colour data."""
+        if not isinstance(raw, str):
+            return None
         raw = raw.strip()
         try:
             if len(raw) == 12:
-                # HHHHSSSSSSSS: H in 0-360, S and V in 0-1000
                 h = int(raw[0:4], 16)
                 s = int(raw[4:8], 16)
-                # v = int(raw[8:12], 16)  # not needed for hs_color
-                return (float(h), float(s) / 10.0)  # HA saturation 0-100
+                v = int(raw[8:12], 16)
+                if 0 <= h <= 360 and 0 <= s <= 1000 and 0 <= v <= 1000:
+                    return (float(h), float(s) / 10.0, round(v / 1000 * 255))
             if len(raw) == 6:
                 # RRGGBB
                 r = int(raw[0:2], 16)
                 g = int(raw[2:4], 16)
                 b = int(raw[4:6], 16)
-                return color_RGB_to_hs(r, g, b)
+                h, s = color_RGB_to_hs(r, g, b)
+                return h, s, max(r, g, b)
         except (ValueError, IndexError):
             pass
         return None
 
     @staticmethod
-    def _encode_colour_data(hs: tuple[float, float]) -> str:
-        """Encode HA HS (hue 0-360, saturation 0-100) to Tuya HHHHSSSSSSSS."""
-        h = int(hs[0])
-        s = int(hs[1] * 10)  # 0-1000
-        v = 1000              # full brightness in colour mode; dim via bright_value
+    def _parse_colour_data(raw: str) -> tuple[float, float] | None:
+        colour = LedvanceTuyaLight._decode_colour_data(raw)
+        return colour[:2] if colour else None
+
+    @staticmethod
+    def _encode_colour_data(
+        hs: tuple[float, float], brightness: int = 255, *, rgb: bool = False
+    ) -> str:
+        """Encode colour while retaining the requested/current brightness."""
+        h = round(max(0, min(360, hs[0])))
+        s = round(max(0, min(100, hs[1])) * 10)
+        brightness = max(0, min(255, brightness))
+        if rgb:
+            channels = colorsys.hsv_to_rgb(h / 360, s / 1000, brightness / 255)
+            return "".join(f"{round(c * 255):02X}" for c in channels)
+        v = round(brightness / 255 * 1000)
         return f"{h:04X}{s:04X}{v:04X}"

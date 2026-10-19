@@ -1,7 +1,9 @@
 {
   "domain": "hass_ledvance",
   "name": "Ledvance / Tuya",
-  "codeowners": ["@buggedcom"],
+  "codeowners": [
+    "@buggedcom"
+  ],
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/buggedcom/hass-ledvance/",
@@ -12,5 +14,5 @@
     "requests>=2.31.0",
     "tinytuya>=1.17.4"
   ],
-  "version": "0.1.0"
+  "version": "0.2.0"
 }

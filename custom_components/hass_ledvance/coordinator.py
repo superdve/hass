@@ -1,20 +1,23 @@
 """DataUpdateCoordinator for Ledvance/Tuya devices."""
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field, replace
+from contextlib import suppress
+from dataclasses import dataclass, replace
 from datetime import timedelta
 
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-
-from .api import DeviceInfo, TuyaAPI
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
 from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from .api import DeviceInfo as TuyaDeviceInfo
+from .api import TuyaAPI
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN, LAN_SCAN_INTERVAL
+from .device_io import device_lock
 from .exceptions import CannotConnect, InvalidAuthentication, TooManyRequests
 from .schema_parser import detect_device_type, get_dps_map
 
@@ -29,15 +32,15 @@ class CoordinatorDeviceData:
     gateway_id: str
     name: str
     product_id: str
-    device_type: str          # 'light' | 'switch' | 'unknown'
+    device_type: str  # 'light' | 'switch' | 'unknown'
     schema: list
-    dps_map: dict[str, str]   # code → dps_number_string
-    dps: dict[str, object]    # dps_number_string → value
+    dps_map: dict[str, str]  # code → dps_number_string
+    dps: dict[str, object]  # dps_number_string → value
     local_key: str
     mac: str
     is_online: bool
-    ip: str | None = None       # cloud-reported IP (typically WAN) — diagnostic only
-    lan_ip: str | None = None   # tinytuya LAN-discovered IP — used for local control
+    ip: str | None = None  # cloud-reported IP (typically WAN) — diagnostic only
+    lan_ip: str | None = None  # tinytuya LAN-discovered IP — used for local control
     version: str | None = None  # Tuya protocol version (e.g. "3.3") — used by tinytuya
     fw_version: str | None = None  # firmware/base version (e.g. "40") — shown in device panel
     room_name: str = ""  # Tuya room name; empty if unassigned
@@ -78,9 +81,14 @@ class LedvanceTuyaCoordinator(DataUpdateCoordinator[DevicesData]):
             update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
         )
         self.api = api
-        self._lan_cache: dict[str, dict] = {}   # device_id → {ip, version}
+        self._lan_cache: dict[str, dict] = {}  # device_id → {ip, version}
         self._last_lan_scan: float = 0.0
         self._lan_monitor_task: asyncio.Task | None = None
+        self._command_locks: dict[str, asyncio.Lock] = {}
+
+    def command_lock(self, device_id: str) -> asyncio.Lock:
+        """Serialize commands, including mixed-channel read/modify/write operations."""
+        return self._command_locks.setdefault(device_id, asyncio.Lock())
 
     # ------------------------------------------------------------------
 
@@ -100,9 +108,7 @@ class LedvanceTuyaCoordinator(DataUpdateCoordinator[DevicesData]):
                 _LOGGER.warning("LAN scan failed (non-fatal): %s", exc)
 
         try:
-            devices_data = await self.hass.async_add_executor_job(
-                self._fetch_all_devices
-            )
+            devices_data = await self.hass.async_add_executor_job(self._fetch_all_devices)
         except InvalidAuthentication as exc:
             raise UpdateFailed(f"Authentication failed: {exc}") from exc
         except TooManyRequests as exc:
@@ -151,7 +157,7 @@ class LedvanceTuyaCoordinator(DataUpdateCoordinator[DevicesData]):
             if not group_id:
                 continue
             try:
-                devices: list[DeviceInfo] = self.api.devices(group_id)
+                devices: list[TuyaDeviceInfo] = self.api.devices(group_id)
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.warning("Failed to fetch devices for group %s: %s", group_id, exc)
                 continue
@@ -165,7 +171,8 @@ class LedvanceTuyaCoordinator(DataUpdateCoordinator[DevicesData]):
                     dev_info.local_key,
                     lan.get("version"),
                 )
-                if dps is not None:
+                lan_reachable = dps is not None
+                if lan_reachable:
                     _LOGGER.debug("DPS for '%s' fetched via LAN", dev_info.name)
                 else:
                     try:
@@ -180,7 +187,6 @@ class LedvanceTuyaCoordinator(DataUpdateCoordinator[DevicesData]):
                 # If the device responded on LAN it's definitely online;
                 # fall back to cloud's is_online only when LAN isn't available.
                 lan_ip = lan.get("ip")
-                lan_reachable = dps is not None and bool(lan_ip)
                 is_online = lan_reachable or dev_info.is_online
 
                 result[dev_info.dev_id] = CoordinatorDeviceData(
@@ -223,20 +229,29 @@ class LedvanceTuyaCoordinator(DataUpdateCoordinator[DevicesData]):
             import tinytuya  # noqa: PLC0415
         except ImportError:
             return None
-        try:
-            d = tinytuya.OutletDevice(
-                dev_id=device_id,
-                address=ip,
-                local_key=local_key,
-                version=float(version),
-            )
-            d.set_socketTimeout(3)
-            status = d.status()
-            if isinstance(status, dict) and "Error" not in status:
-                raw = status.get("dps", {})
-                return {str(k): v for k, v in raw.items()}
-        except Exception as exc:  # noqa: BLE001
-            _LOGGER.debug("Local DPS poll failed for %s (%s): %s", device_id, ip, exc)
+        with device_lock(device_id):
+            d = None
+            try:
+                d = tinytuya.OutletDevice(
+                    dev_id=device_id,
+                    address=ip,
+                    local_key=local_key,
+                    version=float(version),
+                )
+                d.set_socketTimeout(3)
+                status = d.status()
+                if isinstance(status, dict) and "Error" not in status:
+                    raw = status.get("dps")
+                    if isinstance(raw, dict) and raw:
+                        return {str(k): v for k, v in raw.items()}
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Local DPS poll failed for %s (%s): %s", device_id, ip, type(exc).__name__
+                )
+            finally:
+                if d is not None:
+                    with suppress(Exception):
+                        d.close()
         return None
 
     async def _lan_monitor_loop(self) -> None:
@@ -271,18 +286,19 @@ class LedvanceTuyaCoordinator(DataUpdateCoordinator[DevicesData]):
                         dps = await self.hass.async_add_executor_job(
                             self._poll_dps_local, dev_id, ip, dev.local_key, version
                         )
-                        lan_online = dps is not None
-
                         # Only push an update when something actually changed.
                         current = self.data.get(dev_id) if self.data else None
-                        if current is not None and (
-                            lan_online != current.is_online
-                            or (dps is not None and dps != current.dps)
+                        # One missed local poll must not mark a cloud-reachable
+                        # device offline. The regular refresh handles fallback.
+                        if (
+                            current is not None
+                            and dps is not None
+                            and (not current.is_online or dps != current.dps)
                         ):
                             updated = replace(
                                 current,
-                                is_online=lan_online,
-                                dps=dps if dps is not None else current.dps,
+                                is_online=True,
+                                dps=dps,
                             )
                             self.async_set_updated_data({**self.data, dev_id: updated})
 
@@ -294,10 +310,8 @@ class LedvanceTuyaCoordinator(DataUpdateCoordinator[DevicesData]):
         """Cancel the LAN monitor background task."""
         if self._lan_monitor_task and not self._lan_monitor_task.done():
             self._lan_monitor_task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._lan_monitor_task
-            except asyncio.CancelledError:
-                pass
 
     def _scan_lan(self) -> dict[str, dict]:
         """Synchronous: scan LAN for Tuya devices. Returns {device_id: {ip, version}}."""

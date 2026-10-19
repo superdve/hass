@@ -4,6 +4,7 @@ Provides per-outlet countdown timers on socket strip devices.
 Setting a countdown to 0 cancels it; any positive value (seconds)
 schedules the outlet to turn off after that duration.
 """
+
 from __future__ import annotations
 
 import logging
@@ -17,7 +18,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, DPS_COUNTDOWN_PREFIX
 from .coordinator import CoordinatorDeviceData, LedvanceTuyaCoordinator, build_device_info
-from .local_control import async_send_command
+from .local_control import async_send_and_update
 from .schema_parser import get_integer_range
 
 _LOGGER = logging.getLogger(__name__)
@@ -39,16 +40,17 @@ async def async_setup_entry(
         # Find all countdown_N DPS in the schema, ordered by outlet number
         countdown_items = sorted(
             (
-                item for item in dev.schema
+                item
+                for item in dev.schema
                 if (item.get("code", "")).startswith(DPS_COUNTDOWN_PREFIX)
-                and item["code"][len(DPS_COUNTDOWN_PREFIX):].isdigit()
+                and item["code"][len(DPS_COUNTDOWN_PREFIX) :].isdigit()
             ),
-            key=lambda i: int(i["code"][len(DPS_COUNTDOWN_PREFIX):]),
+            key=lambda i: int(i["code"][len(DPS_COUNTDOWN_PREFIX) :]),
         )
 
         for item in countdown_items:
             code = item["code"]
-            outlet_num = code[len(DPS_COUNTDOWN_PREFIX):]
+            outlet_num = code[len(DPS_COUNTDOWN_PREFIX) :]
             entities.append(
                 LedvanceTuyaCountdown(
                     coordinator, entry, dev_id, code, f"Outlet {outlet_num} Countdown"
@@ -108,11 +110,4 @@ class LedvanceTuyaCountdown(CoordinatorEntity[LedvanceTuyaCoordinator], NumberEn
         if self._dps is None:
             return
         dps = {self._dps: int(value)}
-        await async_send_command(
-            self.hass,
-            self.coordinator.api,
-            self._device_data,
-            dps,
-        )
-        self.coordinator.async_optimistic_update(self._device_id, dps)
-        await self.coordinator.async_request_refresh()
+        await async_send_and_update(self.hass, self.coordinator, self._device_id, dps)
